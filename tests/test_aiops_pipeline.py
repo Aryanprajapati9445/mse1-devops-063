@@ -1,7 +1,8 @@
+import json
 from pathlib import Path
 
 from src.anomaly_detector import AnomalyDetector
-from src.aiops_pipeline import run_pipeline
+from src.aiops_pipeline import load_data, run_pipeline
 from src.event_consumer import EventConsumer
 from src.event_producer import EventProducer
 from src.event_topic import EventTopic
@@ -42,6 +43,27 @@ def test_anomalous_record_is_detected():
     assert event["type"] == "ANOMALY"
 
 
+def test_warning_cpu_and_memory_are_detected():
+    detector = AnomalyDetector()
+
+    record = {
+        "timestamp": "2026-09-20T10:07:00",
+        "service": "catalog-service",
+        "response_time_ms": 100,
+        "cpu_percent": 90,
+        "memory_percent": 95,
+        "log_level": "WARNING",
+        "message": "Service under pressure"
+    }
+
+    event = detector.detect(record)
+
+    assert event is not None
+    assert "High CPU utilization" in event["reasons"]
+    assert "High memory utilization" in event["reasons"]
+    assert "Error log detected" in event["reasons"]
+
+
 def test_producer_publishes_event():
     topic = EventTopic("anomaly-events")
     producer = EventProducer(topic)
@@ -70,3 +92,61 @@ def test_consumer_receives_event():
     messages = consumer.consume()
 
     assert len(messages) == 1
+
+
+def test_producer_rejects_empty_event():
+    topic = EventTopic("anomaly-events")
+    producer = EventProducer(topic)
+
+    assert producer.publish(None) is False
+    assert topic.get_messages() == []
+
+
+def test_topic_clear_removes_messages():
+    topic = EventTopic("anomaly-events")
+    topic.publish({"type": "ANOMALY"})
+
+    topic.clear()
+
+    assert topic.get_messages() == []
+
+
+def test_load_data_reads_json_records(tmp_path: Path):
+    file_path = tmp_path / "records.json"
+    records = [{"service": "api-service", "response_time_ms": 100}]
+    file_path.write_text(json.dumps(records), encoding="utf-8")
+
+    loaded = load_data(file_path)
+
+    assert loaded == records
+
+
+def test_run_pipeline_processes_input_file(tmp_path: Path):
+    file_path = tmp_path / "service_data.json"
+    records = [
+        {
+            "timestamp": "2026-09-20T10:00:00",
+            "service": "payment-service",
+            "response_time_ms": 120,
+            "cpu_percent": 42,
+            "memory_percent": 51,
+            "log_level": "INFO",
+            "message": "Payment request processed successfully"
+        },
+        {
+            "timestamp": "2026-09-20T10:05:00",
+            "service": "payment-service",
+            "response_time_ms": 610,
+            "cpu_percent": 75,
+            "memory_percent": 70,
+            "log_level": "ERROR",
+            "message": "Payment service timeout"
+        }
+    ]
+    file_path.write_text(json.dumps(records), encoding="utf-8")
+
+    result = run_pipeline(file_path)
+
+    assert result["records_processed"] == 2
+    assert len(result["anomalies_detected"]) == 1
+    assert result["events_consumed"] == []
